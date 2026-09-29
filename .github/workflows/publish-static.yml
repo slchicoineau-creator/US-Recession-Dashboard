@@ -1,0 +1,96 @@
+# Nightly read-only snapshot of the dashboard, published to GitHub Pages.
+#
+# ASSUMES the repository root is the recession-dashboard/ folder (app.py,
+# kpi_config.yaml, frontend/ at the top level).
+#
+# One-time setup in the GitHub repo:
+#   Settings → Pages → Source: "GitHub Actions"
+#   Settings → Secrets and variables → Actions → add FRED_API_KEY (required),
+#     and BLS_API_KEY / EIA_API_KEY / CENSUS_API_KEY / BEA_API_KEY if you use them.
+# No email or Anthropic secrets are needed or used: the export never sends
+# alerts and never generates AI commentary.
+#
+# The SQLite DB and trained ML model persist between runs in the Actions cache.
+# Cache entries are immutable, so each run SAVES under a unique key
+# (db-<run_id>) and RESTORES the newest one via the "db-" prefix. The first run
+# (or any run after the cache expires, 7 days unused) bootstraps full history,
+# which takes ~20-40 minutes; later runs are incremental.
+
+name: Publish static snapshot
+
+on:
+  schedule:
+    - cron: "0 14 * * *"      # 14:00 UTC daily, after the 8:30 ET data releases
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Restore database cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/
+          key: db-${{ github.run_id }}
+          restore-keys: db-
+
+      - name: Refresh data and export snapshot
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
+          BEA_API_KEY: ${{ secrets.BEA_API_KEY }}
+        run: >
+          python tools/export_static.py --refresh --out site
+          --base "/${{ github.event.repository.name }}/"
+          --repo-url "${{ github.server_url }}/${{ github.repository }}"
+
+      - name: Save database cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: data/
+          key: db-${{ github.run_id }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

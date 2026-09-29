@@ -1,0 +1,30 @@
+.env
+data/*.db
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+node_modules/
+frontend/dist/
+# whole data dir: DB backups (*.bak) and the trained model pickle too
+data/
+# static snapshot build output (tools/export_static.py)
+site/
+.pytest_cache/
+frontend/test-results/
+frontend/playwright-report/
+# leftovers from mistyped `pip install pkg>=x` commands
+/=*
+# local browser-automation snapshots
+.playwright-cli/
+# vendored third-party agent skills (reinstall via skills-lock.json)
+.agents/
+.claude/
+# graphify incremental cache and dated snapshot copies
+graphify-out/cache/
+graphify-out/20*/
+# machine-specific graphify paths
+graphify-out/.graphify_python
+graphify-out/.graphify_root

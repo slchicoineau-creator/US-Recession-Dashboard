@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "forecasting-time-series-data": {
+      "source": "jeremylongshore/claude-code-plugins-plus-skills",
+      "sourceType": "github",
+      "computedHash": "8606fc4f3565931537b6cc7b4903e5a6ea88da312ba559f036df9056dc1bce81"
+    },
+    "statsmodels": {
+      "source": "davila7/claude-code-templates",
+      "sourceType": "github",
+      "computedHash": "a1c24864b725de84fd39dc0d6937add99fa3bc233c934a8049b27f03b5200a49"
+    }
+  }
+}

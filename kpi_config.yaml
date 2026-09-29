@@ -1,0 +1,1712 @@
+# US Economy KPI Dashboard — KPI Configuration
+# Single source of truth for all KPI metadata per FRD Appendix C.
+# Do not hard-code KPI-specific logic in Python or JavaScript files.
+
+refresh_schedule: "07:00"   # daily local time
+history_years: 5
+
+alert_defaults:
+  warning_threshold: 50
+  critical_threshold: 75
+  cooldown_hours: 24
+
+# ---------------------------------------------------------------------------
+# Category weights must sum to 1.0
+# ---------------------------------------------------------------------------
+category_weights:
+  yield_curve:      0.17
+  labor_market:     0.20
+  consumer_health:  0.11
+  housing:          0.10
+  financial_stress: 0.19
+  business_activity: 0.14
+  energy:           0.05
+  automotive:       0.04
+
+# ---------------------------------------------------------------------------
+# Depression Severity components
+# Answers "how severe is the downturn regime?" — orthogonal to the composite
+# score, which measures how LIKELY a recession is. Each component maps one
+# KPI's stored (post-transform) value onto a 0-1 sub-score by linear
+# interpolation between `healthy` (sub-score 0) and `extreme` (sub-score 1).
+# Direction is inferred: extreme < healthy means falling values are worse.
+# The persistence component (months at CRITICAL composite in the last 12) is
+# computed from RecessionScore history with `persistence_weight`.
+# Component weights + persistence_weight must sum to 1.0.
+# ---------------------------------------------------------------------------
+severity:
+  persistence_weight: 0.15
+  components:
+    - kpi_id: cpi_inflation
+      label: "Deflation"
+      healthy: 1.5       # CPI YoY at/above 1.5% = no deflation signal
+      extreme: -1.0      # outright deflation, 1930s signature
+      weight: 0.25
+    - kpi_id: bank_credit
+      label: "Bank credit contraction"
+      healthy: 0.0       # credit flat = first signal; growth = healthy
+      extreme: -4.0      # approaching the 2009-10 trough (-5.45% YoY worst)
+      weight: 0.25
+    - kpi_id: m2_growth
+      label: "Money supply contraction"
+      healthy: 0.0
+      extreme: -6.0      # 2023 record post-1930s contraction hit -5.0% YoY
+      weight: 0.15
+    - kpi_id: unrate
+      label: "Labor market depth"
+      healthy: 6.0       # bad recession but recoverable
+      extreme: 15.0      # depression-scale unemployment
+      weight: 0.20
+
+# ---------------------------------------------------------------------------
+# Benchmark reference series (NOT KPIs)
+# Long-history FRED series used only by backend/benchmarks.py to fit and
+# evaluate independent benchmark models. They are stored in the separate
+# `reference_series` table and are deliberately NOT under `kpis:` — as KPIs
+# they would enter the composite score, dilute category weights and change the
+# ML feature matrix. `usrecm_long` is also kept apart from `nber_recessions`,
+# which feeds the NBER shading drawn on every chart (a 1959 start would
+# stretch every chart's x-axis back to 1959).
+#   publication_lag_months - months after the observation month before the
+#     value is public; the Time Machine and walk-forward backtests only use
+#     observations with month + lag <= as-of month.
+# ---------------------------------------------------------------------------
+reference_series:
+  - key: usrecm_long
+    series_id: USRECM
+    start: "1959-01-01"
+    publication_lag_months: 12   # NBER dates turning points ~4-21 months late
+    description: >
+      NBER recession indicator (monthly 0/1), long history. Label source for
+      the yield-curve benchmark. The same series as the chart shading, but kept
+      separately with a 1959 start.
+  - key: gs10
+    series_id: GS10
+    start: "1959-01-01"
+    publication_lag_months: 1    # monthly average known once the month ends
+    description: 10-Year Treasury constant-maturity rate, monthly average (%).
+  - key: tb3ms
+    series_id: TB3MS
+    start: "1959-01-01"
+    publication_lag_months: 1
+    description: >
+      3-Month Treasury bill secondary-market rate, discount basis, monthly
+      average (%). Converted to bond-equivalent yield before taking the
+      spread, as in the NY Fed yield-curve model.
+  - key: chauvet_piger
+    series_id: RECPROUSM156N
+    start: "1967-01-01"
+    publication_lag_months: 2
+    description: >
+      Chauvet-Piger smoothed U.S. recession probability (%), from a dynamic
+      factor Markov-switching model. RETROSPECTIVE: the whole history is
+      re-estimated with each release, so past values use information that was
+      not available at the time. Shown as a cross-check, never ranked
+      against the forecasts in the backtest.
+
+# ---------------------------------------------------------------------------
+# KPI Definitions
+# Fields:
+#   id             - unique slug used as DB primary key
+#   name           - display name
+#   category       - must match a key in category_weights
+#   source         - fred | bls | eia | yfinance | tsa | bea | manual_csv
+#   series_id      - FRED series ID, BLS series ID, EIA series, or ticker
+#   frequency      - daily | weekly | monthly | quarterly
+#   unit           - display unit string
+#   warning_threshold - value at which status = WARNING (null if N/A)
+#   danger_threshold  - value at which status = DANGER  (null if N/A)
+#   invert         - true if LOWER value = MORE risk (e.g. GDP, confidence)
+#   description    - plain-English explanation shown in KPI detail panel
+# ---------------------------------------------------------------------------
+
+kpis:
+
+  # ── YIELD CURVE & RATES ──────────────────────────────────────────────────
+  - id: t10y2y
+    name: "10Y-2Y Treasury Spread"
+    category: yield_curve
+    timing: leading
+    source: fred
+    series_id: T10Y2Y
+    frequency: daily
+    unit: "% (ppt)"
+    warning_threshold: 0
+    danger_threshold: -0.5
+    invert: true
+    description: >
+      The difference between the 10-year and 2-year Treasury yields (FRED returns
+      values in percentage points: -0.5 = -50 bps). An inverted yield curve (below 0)
+      has preceded every US recession since 1955, typically by 12–18 months.
+      WARNING when inverted; DANGER at -0.5 ppt (-50 bps, well-established inversion).
+
+  - id: dff
+    name: "Daily Federal Funds Rate"
+    category: yield_curve
+    timing: coincident
+    source: fred
+    series_id: DFF
+    frequency: daily
+    unit: "%"
+    warning_threshold: 4.5
+    danger_threshold: 5.5
+    invert: false
+    description: >
+      Daily effective federal funds rate (FRED: DFF). The overnight interbank
+      lending rate reflecting the Fed's current policy stance in real time.
+      WARNING at 4.5% (restrictive territory); DANGER at 5.5% (highly
+      restrictive, historically preceding recessions when sustained).
+
+  - id: t10y3m
+    name: "10Y-3M Treasury Spread"
+    category: yield_curve
+    timing: leading
+    source: fred
+    series_id: T10Y3M
+    frequency: daily
+    unit: "% (ppt)"
+    warning_threshold: 0
+    danger_threshold: -0.5
+    invert: true
+    description: >
+      10-year Treasury yield minus 3-month T-bill rate (FRED returns values in
+      percentage points: -0.5 = -50 bps). The Federal Reserve's preferred yield
+      curve measure. Inversion (below 0) has preceded every US recession since
+      1968 with no false positives. WARNING when inverted; DANGER at -0.5 ppt
+      (-50 bps, well-established inversion with historically very high recession probability).
+
+  - id: t5yie
+    name: "5-Year Breakeven Inflation Rate"
+    category: yield_curve
+    timing: coincident
+    source: fred
+    series_id: T5YIE
+    frequency: daily
+    unit: "%"
+    warning_threshold: 1.5
+    danger_threshold: 1.0
+    invert: true
+    description: >
+      Market-implied 5-year expected inflation derived from TIPS spreads
+      (FRED: T5YIE, daily, 2003–present). Low breakeven inflation signals
+      deflation fears and weakening demand expectations. WARNING at 1.5%
+      (below Fed's 2% target, demand weakness); DANGER at 1.0% (deflation
+      risk, comparable to 2008-2009 and early 2020 crisis levels).
+
+  - id: t10yie
+    name: "10-Year Breakeven Inflation Rate"
+    category: yield_curve
+    timing: coincident
+    source: fred
+    series_id: T10YIE
+    frequency: daily
+    unit: "%"
+    warning_threshold: 1.8
+    danger_threshold: 1.2
+    invert: true
+    description: >
+      Market-implied 10-year expected inflation from TIPS spreads (FRED:
+      T10YIE, daily, 2003–present). A longer-horizon complement to T5YIE.
+      WARNING at 1.8% (persistently below target, secular stagnation risk);
+      DANGER at 1.2% (deep deflation expectations, last seen in 2008 and
+      2020 recessions).
+
+  - id: dfii10
+    name: "10-Year Real Yield (TIPS)"
+    category: yield_curve
+    timing: coincident
+    source: fred
+    series_id: DFII10
+    frequency: daily
+    unit: "%"
+    warning_threshold: 2.5
+    danger_threshold: 3.0
+    invert: false
+    description: >
+      Daily 10-year TIPS real yield (FRED: DFII10). High real yields mean
+      monetary policy is genuinely restrictive after adjusting for inflation
+      expectations. WARNING at 2.5% (significantly restrictive); DANGER at
+      3.0% (extremely restrictive, historically unsustainable without
+      triggering recession).
+
+  - id: dgs2
+    name: "2-Year Treasury Yield"
+    category: yield_curve
+    timing: coincident
+    source: fred
+    series_id: DGS2
+    frequency: daily
+    unit: "%"
+    warning_threshold: null
+    danger_threshold: null
+    invert: false
+    description: >
+      Daily 2-year Treasury yield (FRED: DGS2, 1976–present). The most
+      rate-sensitive maturity — sharp drops signal the bond market pricing
+      in imminent rate cuts due to economic deterioration. No warning/danger
+      thresholds; used as context for yield curve analysis and Fed pivot
+      detection.
+
+  - id: dgs10
+    name: "10-Year Treasury Yield"
+    category: yield_curve
+    timing: coincident
+    source: fred
+    series_id: DGS10
+    frequency: daily
+    unit: "%"
+    warning_threshold: null
+    danger_threshold: null
+    invert: false
+    description: >
+      Daily 10-year Treasury yield (FRED: DGS10, 1962–present). Benchmark
+      long-term rate — sharp drops during equity selloffs signal classic
+      flight-to-safety into Treasuries. No warning/danger thresholds; used
+      as context for yield curve analysis and long-term rate monitoring.
+
+  # ── LABOR MARKET ─────────────────────────────────────────────────────────
+  - id: sahm_rule
+    name: "Sahm Rule Indicator"
+    category: labor_market
+    timing: coincident
+    source: fred
+    series_id: SAHMREALTIME
+    frequency: monthly
+    unit: "pp"
+    warning_threshold: 0.3
+    danger_threshold: 0.5
+    invert: false
+    description: >
+      The Sahm Rule triggers when the 3-month average unemployment rate rises
+      0.50 percentage points above its 12-month low. A trigger of >= 0.50 has
+      indicated recession with ~100% historical accuracy in real-time.
+
+  - id: unrate
+    name: "Unemployment Rate"
+    category: labor_market
+    timing: coincident
+    source: fred
+    series_id: UNRATE
+    frequency: monthly
+    unit: "%"
+    warning_threshold: 4.5
+    danger_threshold: 6.0
+    invert: false
+    description: >
+      The percentage of the labor force that is unemployed and actively seeking
+      work. Rising unemployment signals economic downturn and is a key NBER
+      recession criterion.
+
+  - id: payems
+    name: "Non-Farm Payrolls"
+    category: labor_market
+    timing: coincident
+    source: fred
+    series_id: PAYEMS
+    frequency: monthly
+    unit: "thousands (MoM change)"
+    compute_diff: true
+    warning_threshold: 0
+    danger_threshold: -100
+    invert: true
+    chart_y_min: -1000
+    chart_y_max: 1000
+    description: >
+      Monthly change in total non-farm employment (FRED PAYEMS, in thousands of persons).
+      A value of -100 means -100,000 jobs lost. WARNING when any jobs are lost (< 0);
+      DANGER at -100K jobs/month. Consecutive months of job losses are a core NBER
+      recession criterion. Chart is clipped to ±1,000K to preserve detail (Apr 2020
+      COVID spike of -20M is an extreme outlier; typical monthly swings are ±1,000K).
+
+  - id: icsa
+    name: "Initial Jobless Claims"
+    category: labor_market
+    timing: leading
+    source: fred
+    series_id: ICSA
+    frequency: weekly
+    unit: "persons"
+    warning_threshold: 300000
+    danger_threshold: 400000
+    invert: false
+    chart_y_min: 0
+    chart_y_max: 850000
+    description: >
+      Weekly new unemployment insurance filings (FRED ICSA, raw person count).
+      WARNING when claims exceed 300,000/week; DANGER above 400,000/week.
+      Sustained readings above 300K historically signal labor market deterioration.
+      Chart is clipped to 1,000,000 to preserve detail (COVID 2020 peak of ~6.9M
+      was an extreme outlier). Note: FRED returns raw person counts for this series.
+
+  - id: ccsa
+    name: "Continuing Jobless Claims"
+    category: labor_market
+    timing: coincident
+    source: fred
+    series_id: CCSA
+    frequency: weekly
+    unit: "persons"
+    warning_threshold: 1900000
+    danger_threshold: 2800000
+    invert: false
+    description: >
+      The number of people already receiving unemployment benefits (FRED CCSA,
+      raw person count). WARNING above 1,900,000 (= 1.9M, above 2022–2024
+      structural baseline); DANGER above 2,800,000 (= 2.8M, typical mild recession
+      level). Sustained high levels indicate difficulty re-entering the workforce.
+      Note: FRED returns raw person counts for this series.
+
+  - id: civpart
+    name: "Labor Force Participation Rate"
+    category: labor_market
+    timing: lagging
+    source: fred
+    series_id: CIVPART
+    frequency: monthly
+    unit: "%"
+    warning_threshold: 62.5
+    danger_threshold: 61.5
+    invert: true
+    chart_y_min: 55.0
+    chart_y_max: 75.0
+    description: >
+      The percentage of working-age population employed or actively seeking work.
+      Declining participation may mask true unemployment levels. WARNING below
+      62.5%; DANGER below 61.5%. Chart is constrained to 55–75% range for detail.
+
+  - id: jolts
+    name: "Job Openings (JOLTS)"
+    category: labor_market
+    timing: leading
+    source: fred
+    series_id: JTSJOL
+    frequency: monthly
+    unit: "thousands"
+    warning_threshold: 7000
+    danger_threshold: 5500
+    invert: true
+    description: >
+      Total job openings across all sectors. A sharp decline signals employer
+      caution and slowing hiring plans.
+
+  - id: avg_earnings
+    name: "Average Hourly Earnings Growth"
+    category: labor_market
+    timing: lagging
+    source: fred
+    series_id: CES0500000003
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: 2.0
+    danger_threshold: 0.0
+    invert: true
+    description: >
+      Year-over-year % change in average hourly earnings for all private employees
+      (FRED: CES0500000003). WARNING when YoY growth falls below 2% (real wages
+      at risk from even moderate inflation); DANGER at 0% or below (negative nominal
+      wage growth is extremely rare and signals severe labor market deterioration).
+      Low or falling wage growth reduces consumer purchasing power and spending.
+
+  - id: emratio
+    name: "Employment-Population Ratio"
+    category: labor_market
+    timing: coincident
+    source: fred
+    series_id: EMRATIO
+    frequency: monthly
+    unit: "%"
+    warning_threshold: 59.5
+    danger_threshold: 58.0
+    invert: true
+    chart_y_min: 50.0
+    chart_y_max: 75.0
+    description: >
+      Percentage of the civilian noninstitutional population that is employed.
+      Unlike the unemployment rate, not distorted by labor force exits. WARNING
+      at 59.5% (below the 2015-2019 stable range of 60-61%); DANGER at 58.0%
+      (below levels seen except during or immediately after recession).
+      Chart is constrained to 50–75% range for detail.
+
+  - id: iursa
+    name: "Insured Unemployment Rate"
+    category: labor_market
+    timing: coincident
+    source: fred
+    series_id: IURSA
+    frequency: weekly
+    unit: "%"
+    warning_threshold: 1.5
+    danger_threshold: 2.0
+    invert: false
+    description: >
+      Weekly insured unemployment rate (FRED: IURSA, seasonally adjusted).
+      The percentage of covered employment receiving unemployment insurance
+      benefits. Basis for the Richmond Fed "SOS" recession indicator (a
+      weekly Sahm-style rule). WARNING at 1.5% (above the 2022-2024 baseline
+      of ~1.0-1.2%); DANGER at 2.0% (comparable to mild recession onset
+      levels). More timely than the monthly Sahm Rule.
+
+  - id: temp_help
+    name: "Temp Help Employment YoY Change"
+    category: labor_market
+    timing: leading
+    source: fred
+    series_id: TEMPHELPS
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: 0.0
+    danger_threshold: -8.0
+    invert: true
+    description: >
+      Year-over-year % change in temporary help services employment
+      (FRED: TEMPHELPS, monthly, 1990–present). Temp workers are the first
+      hired in expansions and the first cut when demand softens, making this
+      one of the most reliable early labor-market recession signals. YoY growth
+      was already negative at the onset of the 2001 (-6.1%), 2008 (-3.6%) and
+      2020 (-1.8%) recessions. WARNING when YoY turns negative; DANGER at -8%
+      (deep contraction in contingent labor demand).
+
+  - id: awhman_hours
+    name: "Mfg Weekly Hours YoY Change"
+    category: labor_market
+    timing: leading
+    source: fred
+    series_id: AWHMAN
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: -1.0
+    danger_threshold: -3.0
+    invert: true
+    description: >
+      Year-over-year % change in average weekly hours of manufacturing
+      production employees (FRED: AWHMAN). An official Conference Board LEI
+      component — employers cut hours before they cut heads, so falling
+      factory hours lead payroll declines. WARNING at -1% YoY (hours being
+      trimmed); DANGER at -3% YoY (broad production pullback; the 2001
+      recession began with hours at -2.2% YoY).
+
+  # ── CONSUMER HEALTH ───────────────────────────────────────────────────────
+  # consumer_confidence retired 2026-04: FRED CSCICP03USM665S was discontinued
+  # (last obs 2024-01-01). Consumer sentiment is now covered by `umcsent`
+  # (UMich Sentiment, FRED UMCSENT) under the same category.
+
+  - id: retail_sales
+    name: "Retail Sales (ex-Autos)"
+    category: consumer_health
+    timing: coincident
+    source: fred
+    series_id: RSXFS
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: 0.0
+    danger_threshold: -3.0
+    invert: true
+    description: >
+      Year-over-year % change in retail and food services sales excluding motor
+      vehicles (FRED: RSXFS). What matters is the trend — consecutive months of
+      negative YoY growth signal consumer pullback. WARNING when YoY growth turns
+      negative (< 0%); DANGER at -3% YoY (sharp contraction comparable to
+      early recession conditions).
+
+  - id: personal_savings
+    name: "Personal Savings Rate"
+    category: consumer_health
+    timing: coincident
+    source: fred
+    series_id: PSAVERT
+    frequency: monthly
+    unit: "%"
+    warning_threshold: 4.0
+    danger_threshold: 2.5
+    invert: true
+    description: >
+      Personal savings as a percentage of disposable income. Very low savings
+      leaves households vulnerable to economic shocks.
+
+  - id: cc_delinquency
+    name: "Credit Card Delinquency Rate"
+    category: consumer_health
+    timing: lagging
+    source: fred
+    series_id: DRCCLACBS
+    frequency: quarterly
+    unit: "%"
+    warning_threshold: 2.5
+    danger_threshold: 3.5
+    invert: false
+    description: >
+      Percentage of credit card balances 30+ days past due. Rising delinquencies
+      signal consumer financial stress and precede broader credit problems.
+
+  - id: m2_growth
+    name: "M2 Money Supply Growth (Weekly)"
+    category: consumer_health
+    timing: leading
+    source: fred
+    series_id: WM2NS
+    frequency: weekly
+    unit: "% YoY"
+    compute_pct_change_periods: 52
+    warning_threshold: 5.0
+    danger_threshold: 3.0
+    invert: true
+    description: >
+      Year-over-year % change in M2 broad money supply (FRED: WM2NS, weekly,
+      not seasonally adjusted). Upgraded from monthly M2SL for faster signal.
+      Adequate money supply growth is needed to sustain economic activity.
+      WARNING when YoY growth falls below 5%; DANGER when growth falls below
+      3% YoY (the 2022-2023 contraction to -4% YoY was the most restrictive
+      since the 1930s and preceded the 2023 banking stress).
+      Uses 52 weekly observations for YoY comparison.
+
+  # ── HOUSING MARKET ────────────────────────────────────────────────────────
+  - id: housing_starts
+    name: "Housing Starts"
+    category: housing
+    timing: leading
+    source: fred
+    series_id: HOUST
+    frequency: monthly
+    unit: "thousands (SAAR)"
+    # 2021-26 range was 1265-1700; 1200/900 never triggered (BUGS.md PYT-001).
+    warning_threshold: 1300
+    danger_threshold: 1000
+    invert: true
+    description: >
+      Annualized new residential construction starts. A major leading indicator;
+      typically drops 25–50% before recessions.
+
+  - id: building_permits
+    name: "Building Permits"
+    category: housing
+    timing: leading
+    source: fred
+    series_id: PERMIT
+    frequency: monthly
+    unit: "thousands (SAAR)"
+    # 2021-26 range was 1330-1900; 1200/900 never triggered (BUGS.md PYT-001).
+    warning_threshold: 1400
+    danger_threshold: 1100
+    invert: true
+    description: >
+      Forward-looking residential building permits. Declines typically lead
+      housing starts by 1–3 months.
+
+  - id: existing_home_sales
+    name: "Existing Home Sales"
+    category: housing
+    timing: leading
+    source: fred
+    series_id: EXHOSLUSM495S
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: -10.0
+    danger_threshold: -20.0
+    invert: true
+    description: >
+      Year-over-year % change in NAR Existing Home Sales (FRED: EXHOSLUSM495S,
+      monthly, SAAR). The broadest measure of U.S. housing activity — existing
+      homes are ~85% of transactions. WARNING at -10% YoY; DANGER at -20% YoY.
+      Note: this series only became available on FRED in Feb 2025, so chart
+      history will be short until more data accumulates. New-construction sales
+      are tracked separately by `new_home_sales` (HSN1F).
+
+  - id: new_home_sales
+    name: "New Home Sales"
+    category: housing
+    timing: leading
+    source: fred
+    series_id: HSN1F
+    frequency: monthly
+    unit: "thousands (SAAR)"
+    warning_threshold: 550
+    danger_threshold: 400
+    invert: true
+    description: >
+      Sales of newly constructed single-family homes. More volatile than
+      existing home sales; serves as a leading indicator.
+
+  - id: mortgage_rate_30y
+    name: "30-Year Fixed Mortgage Rate"
+    category: housing
+    timing: leading
+    source: fred
+    series_id: MORTGAGE30US
+    frequency: weekly
+    unit: "%"
+    warning_threshold: 7.0
+    danger_threshold: 8.0
+    invert: false
+    description: >
+      Average 30-year fixed mortgage rate from Freddie Mac. High rates suppress
+      affordability and reduce housing purchasing activity.
+
+  - id: case_shiller
+    name: "Case-Shiller Home Price Index"
+    category: housing
+    timing: lagging
+    source: fred
+    series_id: CSUSHPISA
+    frequency: monthly
+    # Case-Shiller publishes ~2 months behind (April data lands end of June),
+    # so the default 95d monthly window false-alarms right before each release.
+    staleness_window_days: 130
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: 0.0
+    danger_threshold: -5.0
+    invert: true
+    description: >
+      Year-over-year % change in the S&P/Case-Shiller national composite home
+      price index (FRED: CSUSHPISA). What matters is the rate of decline —
+      WARNING when YoY growth turns negative (< 0%, any price decline signals
+      market stress); DANGER at -5% YoY (significant correction comparable to
+      early 2008 housing crisis decline). Sustained negative growth in home
+      prices precedes foreclosures and banking stress.
+
+  - id: housing_affordability
+    name: "New Housing Starts"
+    category: housing
+    timing: leading
+    source: fred
+    series_id: HOUST
+    frequency: monthly
+    unit: "thousands of units (SAAR)"
+    # Same series as housing_starts (HOUST); recalibrated together (PYT-001).
+    warning_threshold: 1300
+    danger_threshold: 1000
+    invert: true
+    description: >
+      New privately-owned housing units started (SAAR, thousands, FRED: HOUST, 1959–present).
+      Housing starts are a leading recession indicator — they peaked in 2006 at ~2,300K,
+      fell 75% before the 2008 crisis, and bottomed at ~478K in 2009. Below 1,000K signals
+      a slowing market (WARNING); below 700K signals severe contraction (DANGER).
+
+  - id: mortgage_delinquency
+    name: "Mortgage Delinquency Rate"
+    category: housing
+    timing: lagging
+    source: fred
+    series_id: DRSFRMACBS
+    frequency: quarterly
+    unit: "%"
+    # 2021-26 max 2.3%; 3.0/5.0 never triggered (BUGS.md PYT-001).
+    warning_threshold: 2.5
+    danger_threshold: 4.0
+    invert: false
+    description: >
+      Percentage of residential mortgages 30+ days delinquent. Rising rates
+      precede foreclosures and home price declines.
+
+  - id: median_home_price
+    name: "Median Home Sale Price"
+    category: housing
+    timing: lagging
+    source: fred
+    series_id: MSPUS
+    frequency: quarterly
+    unit: "% YoY"
+    compute_pct_change_periods: 4
+    warning_threshold: 0.0
+    danger_threshold: -5.0
+    invert: true
+    description: >
+      Year-over-year % change in median US home sale price (FRED: MSPUS,
+      quarterly). Nominal price declines signal market distress and reduce
+      household wealth. WARNING when YoY growth turns negative (< 0%, any price
+      decline signals softening demand); DANGER at -5% YoY (meaningful correction,
+      comparable to early-stage 2008–2009 housing crisis declines).
+
+  - id: xhb
+    name: "Homebuilder ETF YoY (Housing Proxy)"
+    category: housing
+    timing: leading
+    source: yfinance
+    series_id: "XHB"
+    frequency: daily
+    unit: "% YoY"
+    compute_pct_change_periods: 252
+    warning_threshold: -15
+    danger_threshold: -30
+    invert: true
+    description: >
+      SPDR S&P Homebuilders ETF year-over-year performance (Yahoo Finance: XHB,
+      daily). Daily forward-looking proxy for monthly housing starts/permits/sales.
+      Stock market prices in housing weakness months before Census data confirms.
+      WARNING at -15% YoY (housing sector under pressure); DANGER at -30% YoY
+      (severe housing downturn, comparable to 2007-2008). Uses 252 trading days
+      for YoY comparison.
+
+  # ── FINANCIAL STRESS ──────────────────────────────────────────────────────
+  - id: vix
+    name: "CBOE VIX (Fear Index)"
+    category: financial_stress
+    timing: leading
+    source: yfinance
+    series_id: "^VIX"
+    frequency: daily
+    unit: "index"
+    warning_threshold: 25
+    danger_threshold: 35
+    invert: false
+    description: >
+      The implied 30-day volatility of the S&P 500. Spikes above 30–40
+      historically coincide with financial stress events and recessions.
+
+  - id: ig_spread
+    name: "Investment Grade Credit Spread"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: BAMLC0A0CM
+    frequency: daily
+    unit: "% OAS"
+    warning_threshold: 1.0
+    danger_threshold: 2.0
+    invert: false
+    description: >
+      Option-adjusted spread on investment grade corporate bonds over Treasuries
+      (FRED: BAMLC0A0CM, returns values in %, e.g. 1.5 = 150 bps). Widening
+      spreads reflect rising default risk perception. WARNING at 1.0% OAS
+      (100 bps, notably above the 0.8–1.0% tight-market norm); DANGER at 2.0%
+      OAS (200 bps, consistent with recession-level credit risk). Typical
+      range: 0.8–1.5%. COVID 2020 peak: ~3.8%. 2008 peak: ~6.5%.
+
+  - id: hy_spread
+    name: "High Yield (Junk) Spread"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: BAMLH0A0HYM2
+    frequency: daily
+    unit: "% OAS"
+    warning_threshold: 5.0
+    danger_threshold: 8.0
+    invert: false
+    description: >
+      Option-adjusted spread on high yield (junk) bonds over Treasuries (FRED:
+      BAMLH0A0HYM2, returns values in %, e.g. 5.0 = 500 bps). Widening spreads
+      indicate rising default risk in speculative-grade debt. WARNING at 5.0%
+      (500 bps, stressed market); DANGER at 8.0% (800 bps, recession-level stress).
+      Typical range: 3–5%. COVID 2020 peak: ~11%. 2008 peak: ~20%.
+
+  - id: nfci
+    name: "Chicago Fed NFCI"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: NFCI
+    frequency: weekly
+    unit: "index"
+    # 2021-26 max -0.10; 0.3/0.7 never triggered (BUGS.md PYT-001). NFCI is
+    # demeaned around 0; positive = tightening, negative = loose.
+    warning_threshold: 0.0
+    danger_threshold: 0.5
+    invert: false
+    description: >
+      National Financial Conditions Index. Positive values indicate
+      tighter-than-average financial conditions; the higher the value, the
+      more stressed financial markets are.
+
+  - id: sp500
+    name: "S&P 500 Index"
+    category: financial_stress
+    timing: leading
+    source: yfinance
+    series_id: "^GSPC"
+    frequency: daily
+    unit: "% YoY"
+    compute_pct_change_periods: 252
+    warning_threshold: -5.0
+    danger_threshold: -12.5
+    invert: true
+    description: >
+      Year-over-year % change in the S&P 500 broad equity index (Yahoo Finance:
+      ^GSPC). A decline of -5% YoY signals early weakness (WARNING); -12.5% YoY
+      signals a meaningful bear market and historically correlates with or precedes
+      recession (DANGER). Note: daily data is stored; YoY % change uses 252
+      trading-day periods (pct_change is row-based, so 252 rows ≈ 1 year).
+
+  - id: kkr_stock
+    name: "KKR & Co Stock Price (PE Sector Proxy)"
+    category: financial_stress
+    timing: coincident
+    source: yfinance
+    series_id: "KKR"
+    frequency: daily
+    unit: "USD"
+    warning_threshold: 100
+    danger_threshold: 78
+    invert: true
+    description: >
+      Daily closing price of KKR & Co Inc, proxy for private equity and
+      alternative asset management sector. ATH ~$130 in 2024. WARNING at $100
+      (~23% drawdown); DANGER at $78 (~40% drawdown) — consistent with a
+      private credit market dislocation. Correlated with APO and BX.
+
+  - id: apo_stock
+    name: "Apollo Global Management Stock Price"
+    category: financial_stress
+    timing: coincident
+    source: yfinance
+    series_id: "APO"
+    frequency: daily
+    unit: "USD"
+    warning_threshold: 100
+    danger_threshold: 78
+    invert: true
+    description: >
+      Daily closing price of Apollo Global Management, one of the largest
+      private credit originators globally. ATH ~$130 in 2024. WARNING at
+      $100 (~23% drawdown); DANGER at $78 (~40% drawdown). Sustained weakness
+      across multiple alt-asset managers confirms systemic private credit stress.
+
+  - id: bx_stock
+    name: "Blackstone Inc Stock Price (Alt Asset Manager)"
+    category: financial_stress
+    timing: coincident
+    source: yfinance
+    series_id: "BX"
+    frequency: daily
+    unit: "USD"
+    warning_threshold: 130
+    danger_threshold: 102
+    invert: true
+    description: >
+      Daily closing price of Blackstone Inc, world's largest alternative
+      asset manager with PE, private credit, and real estate exposure. ATH
+      ~$170 in 2024. WARNING at $130 (~24% drawdown); DANGER at $102 (~40%
+      drawdown). Equivalent percentage drawdown thresholds to KKR and APO.
+
+  - id: biz_loan_delinquency
+    name: "Business Loan Delinquency Rate (All Commercial Banks)"
+    category: financial_stress
+    timing: lagging
+    source: fred
+    series_id: DRBLACBS
+    frequency: quarterly
+    unit: "%"
+    # 2021-26 max 1.34%; 1.5/2.5 never triggered (BUGS.md PYT-001).
+    warning_threshold: 1.3
+    danger_threshold: 2.0
+    invert: false
+    description: >
+      Delinquency rate on business loans at all commercial banks (FRED: DRBLACBS).
+      WARNING at 1.5% (above the 2015-2019 stable baseline); DANGER at 2.5%
+      (mid-2008 level). Rising alongside hy_spread or declining PE stocks
+      confirms banking exposure to private credit market stress.
+
+  - id: gold_price
+    name: "Gold Price YoY Change (Safe Haven)"
+    category: financial_stress
+    timing: coincident
+    source: yfinance
+    series_id: "GC=F"
+    frequency: daily
+    unit: "% YoY change"
+    compute_pct_change_periods: 252
+    # 2024-26 saw gold YoY persistently >30% (251 trading days at min 32.4%);
+    # old 15/30 thresholds always pinned this KPI to DANGER (BUGS.md PYT-002).
+    warning_threshold: 25
+    danger_threshold: 50
+    invert: false
+    description: >
+      Year-over-year % change in gold futures price (Yahoo Finance: GC=F, USD/troy oz, daily).
+      A surge in gold prices signals flight-to-safety demand and crisis fear regardless
+      of the absolute price level. WARNING at +15% YoY; DANGER at +30% YoY
+      (gold rose ~30% YoY in Sept 2008 and ~40% YoY in 2020).
+      Uses 252 trading days for YoY comparison.
+
+  - id: silver_price
+    name: "Silver Price YoY Change (Safe Haven + Industrial)"
+    category: financial_stress
+    timing: coincident
+    source: yfinance
+    series_id: "SI=F"
+    frequency: daily
+    unit: "% YoY change"
+    compute_pct_change_periods: 252
+    warning_threshold: 20
+    danger_threshold: 40
+    invert: false
+    description: >
+      Year-over-year % change in silver futures price (Yahoo Finance: SI=F, USD/troy oz, daily).
+      Combines safe-haven demand with industrial usage. WARNING at +20% YoY; DANGER at +40%
+      YoY (time-invariant thresholds that capture crisis-level safe-haven surges
+      across any historical period). Uses 252 trading days for YoY comparison.
+
+  - id: drtscilm
+    name: "Senior Loan Officer Survey — C&I Tightening"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: DRTSCILM
+    frequency: quarterly
+    unit: "net %"
+    warning_threshold: 20
+    danger_threshold: 40
+    invert: false
+    description: >
+      Net % of domestic banks tightening standards for C&I loans (FRED: DRTSCILM),
+      from the Fed's Senior Loan Officer Opinion Survey. WARNING at net 20%;
+      DANGER at net 40% (comparable to mid-2008 and early 2020). Directly
+      measures bank credit tightening, constraining business investment and hiring.
+
+  - id: usd_broad_index
+    name: "US Dollar Index YoY Change"
+    category: financial_stress
+    timing: coincident
+    source: fred
+    series_id: DTWEXBGS
+    frequency: daily
+    unit: "% YoY change"
+    compute_pct_change_periods: 252
+    warning_threshold: 0
+    danger_threshold: -1.0
+    invert: true
+    description: >
+      Year-over-year % change in the Trade Weighted US Dollar Index: Broad Goods and Services
+      (FRED: DTWEXBGS, daily, 2006–present). Replaces the discontinued DTWEXM series (retired
+      Dec 2018). Measures dollar purchasing power vs a basket of major trading partner currencies.
+      A sustained decline signals capital flight from dollar-denominated assets and erosion of
+      reserve currency status. WARNING when YoY change turns negative (any dollar weakness vs
+      prior year); DANGER at -1.0% YoY (meaningful sustained decline).
+      Uses 252 trading days for YoY comparison.
+
+  - id: foreign_treasury_holdings
+    name: "Foreign Official Treasury Holdings YoY Change"
+    category: financial_stress
+    timing: coincident
+    source: fred
+    # 2026-07 migration: was FDHBFIN (Treasury Bulletin), which publishes ~3
+    # quarters late (Oct 2025 data released June 2026). BOGZ1FL263061130Q is the
+    # Fed Z.1 flow-of-funds measure of Treasury securities held by FOREIGN
+    # OFFICIAL institutions (central banks) — a purer reserve-currency signal,
+    # published ~10 weeks after quarter end. FDHBFIN is alive, just too laggy
+    # for a real-time monitor.
+    series_id: BOGZ1FL263061130Q
+    frequency: quarterly
+    unit: "% YoY change"
+    compute_pct_change_periods: 4
+    warning_threshold: -3
+    danger_threshold: -8
+    invert: true
+    description: >
+      Year-over-year % change in Treasury securities held by foreign official
+      institutions — i.e. foreign central banks (FRED: BOGZ1FL263061130Q, Fed Z.1
+      flow of funds, quarterly, 1945–present). When foreign central banks reduce
+      their Treasury holdings they are directly reducing dollar reserves — the most
+      direct free measure of active de-dollarization by sovereign actors. WARNING
+      at -3% YoY; DANGER at -8% YoY (sustained foreign official exit from
+      Treasuries; since 2000 the -8% level was only breached in 2015–16 and 2022).
+
+  - id: stlfsi
+    name: "St. Louis Fed Financial Stress Index"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: STLFSI4
+    frequency: weekly
+    unit: "index"
+    warning_threshold: 0.5
+    danger_threshold: 1.5
+    invert: false
+    description: >
+      St. Louis Fed Financial Stress Index (FRED: STLFSI4, weekly, 1993–present).
+      Composite of 18 indicators (interest rates, yield spreads, volatility).
+      Zero represents normal conditions; positive values indicate above-average
+      stress. WARNING at 0.5 (elevated stress); DANGER at 1.5 (severe stress,
+      comparable to early stages of 2008 GFC and 2020 COVID peaks above 5.0).
+
+  - id: anfci
+    name: "Adjusted National Financial Conditions Index"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: ANFCI
+    frequency: weekly
+    unit: "index"
+    # 2021-26 max -0.023; 0.3/0.7 never triggered (BUGS.md PYT-001).
+    warning_threshold: 0.0
+    danger_threshold: 0.5
+    invert: false
+    description: >
+      Chicago Fed Adjusted National Financial Conditions Index (FRED: ANFCI,
+      weekly). Removes the systematic component driven by economic conditions,
+      isolating pure financial stress. Complements the existing NFCI by
+      capturing credit market dislocations independent of the business cycle.
+      WARNING at 0.3; DANGER at 0.7 (comparable to early stages of 2008 and
+      2020 crises).
+
+  - id: bbb_spread
+    name: "BBB Corporate Bond Spread"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: BAMLC0A4CBBB
+    frequency: daily
+    unit: "% OAS"
+    warning_threshold: 2.0
+    danger_threshold: 3.5
+    invert: false
+    description: >
+      Option-adjusted spread on BBB-rated corporate bonds over Treasuries
+      (FRED: BAMLC0A4CBBB, daily). BBB is the lowest investment-grade rating;
+      spread widening signals risk of fallen-angel downgrades and forced
+      selling by IG-only mandates. WARNING at 2.0% OAS (200 bps, stressed);
+      DANGER at 3.5% OAS (350 bps, near the IG/HY boundary stress seen in
+      2008 and 2020). Complements existing IG and HY spread KPIs.
+
+  - id: walcl
+    name: "Fed Balance Sheet (Total Assets YoY%)"
+    category: financial_stress
+    timing: coincident
+    source: fred
+    series_id: WALCL
+    frequency: weekly
+    unit: "% YoY"
+    compute_pct_change_periods: 52
+    warning_threshold: -5
+    danger_threshold: -10
+    invert: true
+    description: >
+      Year-over-year % change in Federal Reserve total assets (FRED: WALCL,
+      weekly, millions of dollars). A shrinking balance sheet (quantitative
+      tightening) reduces system-wide liquidity and tightens financial
+      conditions. WARNING at -5% YoY (active QT pace); DANGER at -10% YoY
+      (aggressive QT, historically stresses repo markets and bank reserves).
+      Balance sheet expansion (positive YoY%) signals easing.
+
+  - id: bank_credit
+    name: "Bank Credit YoY Change"
+    category: financial_stress
+    timing: coincident
+    source: fred
+    series_id: TOTBKCR
+    frequency: weekly
+    unit: "% YoY"
+    compute_pct_change_periods: 52
+    warning_threshold: 1.0
+    danger_threshold: -1.0
+    invert: true
+    description: >
+      Year-over-year % change in total bank credit at all commercial banks
+      (FRED: TOTBKCR, weekly, 1973–present). Outright credit contraction is the
+      signature of debt-deflation dynamics — it happened in 2009-2010 and in the
+      Great Depression, but not in ordinary recessions. WARNING at +1% YoY
+      (credit growth stalling); DANGER at -1% YoY (contraction underway).
+      Also feeds the Depression Severity score.
+
+  - id: cp_ff_spread
+    name: "Commercial Paper - Fed Funds Spread"
+    category: financial_stress
+    timing: leading
+    source: fred
+    series_id: CPFF
+    frequency: daily
+    unit: "% spread"
+    warning_threshold: 0.5
+    danger_threshold: 1.0
+    invert: false
+    description: >
+      3-Month AA Financial Commercial Paper rate minus Fed Funds rate (FRED: CPFF,
+      daily). Measures short-term credit/liquidity stress. Normal: ~0.1-0.3%.
+      Spikes signal credit freeze — hit 2.5% in Oct 2008 and ~1.5% in Mar 2020.
+      Daily replacement for the quarterly Senior Loan Officer Survey (DRTSCILM)
+      concept: when banks tighten lending, commercial paper rates spike relative
+      to fed funds. WARNING at 0.5% (stressed); DANGER at 1.0% (credit freeze).
+
+  - id: shiller_cape
+    name: "Shiller CAPE Ratio"
+    category: financial_stress
+    timing: coincident
+    source: scrape_cape
+    series_id: null
+    frequency: monthly
+    unit: "ratio"
+    warning_threshold: 25
+    danger_threshold: 35
+    invert: false
+    description: >
+      Cyclically Adjusted Price-to-Earnings ratio (CAPE / Shiller P/E),
+      scraped from multpl.com. Divides the S&P 500 price by 10-year average
+      real earnings. WARNING at 25 (historically elevated, above long-term
+      mean of ~17); DANGER at 35 (extreme overvaluation territory, comparable
+      to 1929 and 2000 dot-com peaks). High CAPE does not predict timing but
+      indicates elevated downside risk when a recession catalyst appears.
+
+  - id: sp500_ma200
+    name: "S&P 500 vs 200-Day MA"
+    category: financial_stress
+    timing: leading
+    source: derived_ma
+    series_id: "^GSPC"
+    frequency: daily
+    unit: "% from MA"
+    ma_window: 200
+    warning_threshold: -5
+    danger_threshold: -10
+    invert: true
+    description: >
+      Percentage distance of the S&P 500 daily close from its 200-day simple
+      moving average. Negative values mean the index is trading below its MA
+      (bearish signal). WARNING at -5% (moderate downtrend); DANGER at -10%
+      (severe breakdown, historically associated with bear markets and
+      recessions). The 200-day MA is the most widely watched trend indicator
+      by institutional investors.
+
+  - id: buffett_indicator
+    name: "Buffett Indicator (Market Cap / GDP)"
+    category: financial_stress
+    timing: coincident
+    source: derived_ratio
+    series_id: null
+    frequency: quarterly
+    unit: "% of GDP"
+    ratio_numerator:
+      source: fred
+      series_id: NCBCEL
+      unit_divisor: 1000
+    ratio_denominator:
+      source: fred
+      series_id: GDP
+    warning_threshold: 130
+    danger_threshold: 180
+    invert: false
+    description: >
+      Total stock market capitalization as a percentage of GDP, popularized by
+      Warren Buffett as "probably the best single measure of where valuations
+      stand." Uses Nonfinancial Corporate Equities (FRED: NCBCEL, quarterly,
+      millions) divided by Nominal GDP (FRED: GDP, quarterly, billions).
+      NCBCEL is divided by 1000 to convert to billions before computing ratio.
+      WARNING at 130% (historically elevated); DANGER at 180% (extreme
+      overvaluation, current reading ~200%+).
+
+  # ── BUSINESS ACTIVITY ─────────────────────────────────────────────────────
+  - id: gdp_growth
+    name: "Atlanta Fed GDPNow (Real-Time GDP Estimate)"
+    category: business_activity
+    timing: coincident
+    source: scrape_gdpnow
+    series_id: null
+    frequency: weekly
+    unit: "% (SAAR)"
+    warning_threshold: 0
+    danger_threshold: -1.0
+    invert: true
+    chart_y_min: -10.0
+    chart_y_max: 10.0
+    # Nowcasts arrive every few days; the longest gap since 2022 is 13 days.
+    # The 60-day weekly default let a broken download (Atlanta Fed site move,
+    # Sep 2026) go unflagged for weeks.
+    staleness_window_days: 21
+    description: >
+      Atlanta Fed GDPNow real-time GDP growth estimate, fetched directly from
+      the Atlanta Fed's GDPTrackingModelDataAndForecasts.xlsx (updated 6-7 times
+      per month as new economic data releases). Switched from FRED GDPNOW in
+      2026-04 because that FRED series stopped publishing after 2026-01-01.
+      WARNING at 0% (stall speed); DANGER at -1.0% annualized. Chart clipped
+      to +/-10%.
+
+  - id: ism_manufacturing
+    name: "Industrial Production: Manufacturing"
+    category: business_activity
+    timing: coincident
+    source: fred
+    series_id: IPMAN
+    frequency: monthly
+    unit: "index (2017=100)"
+    warning_threshold: 98
+    danger_threshold: 93
+    invert: true
+    chart_y_min: 75.0
+    chart_y_max: 110.0
+    description: >
+      Federal Reserve index of manufacturing output (2017=100). Sustained readings
+      below 98 signal softening; below 93 historically accompany recessions.
+      Chart is constrained to 75–110 range for detail.
+
+  - id: ism_services
+    name: "Chicago Fed National Activity Index"
+    category: business_activity
+    timing: coincident
+    source: fred
+    series_id: CFNAI
+    frequency: monthly
+    unit: "standardized index"
+    warning_threshold: -0.35
+    danger_threshold: -0.7
+    invert: true
+    chart_y_min: -5.0
+    chart_y_max: 3.0
+    description: >
+      Chicago Fed National Activity Index (FRED: CFNAI, monthly since 1967) —
+      a weighted average of 85 monthly indicators of national economic activity.
+      Values near 0 indicate growth at historical trend; negative values indicate
+      below-trend growth. WARNING at -0.35 (three-month average below this has
+      been an early recession signal); DANGER at -0.7 (sustained readings below
+      this threshold have preceded every U.S. recession since 1967). Switched
+      from USALOLITONOSTSAM in 2026-04 after that OECD proxy was discontinued
+      on FRED. The KPI id is kept as `ism_services` to avoid a DB migration; the
+      underlying indicator is broader than its name suggests.
+
+  - id: cpi_inflation
+    name: "CPI Inflation (YoY %)"
+    category: business_activity
+    timing: lagging
+    source: fred
+    series_id: CPIAUCSL
+    frequency: monthly
+    unit: "% YoY change"
+    compute_pct_change_periods: 12
+    warning_threshold: 4.0
+    danger_threshold: 7.0
+    invert: false
+    description: >
+      Year-over-year % change in the Consumer Price Index for all urban consumers
+      (FRED: CPIAUCSL). WARNING at 4% YoY (above the Fed's 2% target, elevated);
+      DANGER at 7% YoY (crisis-level inflation, last seen in 2022). High inflation
+      erodes purchasing power and forces aggressive Fed rate hikes, increasing
+      recession risk.
+
+  - id: wei
+    name: "Weekly Economic Index (WEI)"
+    category: business_activity
+    timing: coincident
+    source: fred
+    series_id: WEI
+    frequency: weekly
+    unit: "index (GDP-scaled %)"
+    warning_threshold: -1.0
+    danger_threshold: -3.0
+    invert: true
+    description: >
+      NY Fed/Dallas Fed Weekly Economic Index (FRED: WEI, weekly). Composite of
+      10 high-frequency indicators: Redbook retail sales, Rasmussen consumer index,
+      initial/continuing claims, tax withholdings, rail traffic, staffing index,
+      steel production, fuel sales, electricity load. Scaled to 4-quarter GDP
+      growth — a reading of -2 means GDP ~2% below year ago. Replaces monthly
+      CFNAI as the primary broad economic activity composite. WARNING at -1.0;
+      DANGER at -3.0 (COVID trough was ~-11).
+
+  - id: rail_carloads
+    name: "Rail Freight Carloads (Monthly)"
+    category: business_activity
+    timing: coincident
+    source: fred
+    series_id: RAILFRTCARLOADSD11
+    # 2026-07 fix: this BTS series is MONTHLY, not weekly (was mislabeled).
+    # BTS publishes ~3 months behind (April data released July 1), so it also
+    # needs a wider staleness window than the 95d monthly default.
+    frequency: monthly
+    staleness_window_days: 150
+    unit: "carloads"
+    warning_threshold: null
+    danger_threshold: null
+    invert: false
+    description: >
+      Monthly rail freight carloads, seasonally adjusted (FRED: RAILFRTCARLOADSD11,
+      Bureau of Transportation Statistics, ~3-month publication lag).
+      Physical economy activity — goods movement, manufacturing demand, energy
+      shipments. Context tracker (no scoring) — absolute levels are seasonal and
+      regime-dependent. Use alongside WEI for manufacturing activity signal.
+      Rail traffic is one of the 10 components of the WEI composite.
+
+  - id: lumber_futures
+    name: "Lumber Futures Price YoY Change"
+    category: business_activity
+    timing: leading
+    source: yfinance
+    series_id: "LBR=F"
+    # Daily, not monthly (Sep 2026): Yahoo's 1mo bars for LBR=F skip whole
+    # months (9 gaps since 2022, incl. Feb-Mar 2026), so a row-based
+    # pct_change(12) compared against the wrong month (stored -19.3% WARNING vs
+    # true ~-8% OK), and the 12-bar incremental window yielded 0 rows, freezing
+    # the KPI at 2026-09-02. Daily bars are complete (~252/yr), same as sp500.
+    frequency: daily
+    unit: "% YoY"
+    compute_pct_change_periods: 252
+    warning_threshold: -15
+    danger_threshold: -30
+    invert: true
+    description: >
+      Year-over-year % change in lumber futures price (Yahoo Finance: LBR=F,
+      CME Physical Lumber futures, daily). Lumber is a leading indicator for
+      housing and construction activity. WARNING at -15% YoY (meaningful demand
+      weakness); DANGER at -30% YoY (deep construction slowdown, comparable to
+      2022 housing correction). Switched from the older Random-Length ticker
+      LBS=F in 2026-04 after that contract was delisted from yfinance.
+
+  - id: copper_futures_daily
+    name: "Copper Futures (Daily)"
+    category: business_activity
+    timing: leading
+    source: yfinance
+    series_id: "HG=F"
+    frequency: daily
+    unit: "USD/lb"
+    warning_threshold: 3.50
+    danger_threshold: 2.80
+    invert: true
+    description: >
+      Daily copper futures price (Yahoo Finance: HG=F, USD per pound).
+      Complements the monthly FRED copper price (PCOPPUSDM) with daily
+      granularity. "Dr. Copper" is widely regarded for its diagnostic value
+      in gauging global industrial demand. WARNING at $3.50/lb (demand
+      softening); DANGER at $2.80/lb (recessionary levels seen in 2015-2016
+      and early 2020).
+
+  - id: heavy_truck_sales
+    name: "Heavy Truck Sales YoY Change"
+    category: business_activity
+    timing: leading
+    source: fred
+    series_id: HTRUCKSSA
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: -10.0
+    danger_threshold: -25.0
+    invert: true
+    description: >
+      Year-over-year % change in heavy-weight truck retail sales
+      (FRED: HTRUCKSSA, monthly SAAR, 1990–present). Heavy trucks are a pure
+      business-investment purchase — fleets stop ordering the moment freight
+      demand and capex confidence roll over, historically 6–12 months before
+      recessions. YoY sales were down -27% at the 2001 onset and -42% at the
+      2008 onset. WARNING at -10% YoY; DANGER at -25% YoY.
+
+  # ── ENERGY MARKET ─────────────────────────────────────────────────────────
+  - id: wti_crude
+    name: "WTI Crude Oil Spot Price"
+    category: energy
+    timing: coincident
+    source: yfinance
+    series_id: CL=F
+    frequency: daily
+    unit: "USD/barrel"
+    warning_threshold: 90
+    danger_threshold: 110
+    invert: false
+    description: >
+      West Texas Intermediate crude oil spot price. Rapid price spikes
+      historically precede or coincide with recessions by increasing costs
+      across the economy.
+
+  - id: brent_crude
+    name: "Brent Crude Oil Spot Price"
+    category: energy
+    timing: coincident
+    source: yfinance
+    series_id: BZ=F
+    frequency: daily
+    unit: "USD/barrel"
+    warning_threshold: 90
+    danger_threshold: 115
+    invert: false
+    description: >
+      Brent global crude benchmark. Divergence with WTI can signal localized
+      supply or geopolitical stress.
+
+  - id: gasoline_price
+    name: "US Retail Gasoline Price"
+    category: energy
+    timing: coincident
+    source: fred
+    series_id: GASREGCOVW
+    frequency: weekly
+    unit: "$/gallon"
+    warning_threshold: 3.80
+    danger_threshold: 4.50
+    invert: false
+    description: >
+      US national average retail gasoline price. Sustained spikes historically
+      reduce consumer discretionary spending.
+
+  - id: natgas_price
+    name: "Henry Hub Natural Gas Price"
+    category: energy
+    timing: coincident
+    source: yfinance
+    series_id: NG=F
+    frequency: daily
+    unit: "USD/MMBtu"
+    warning_threshold: 4.0
+    danger_threshold: 6.0
+    invert: false
+    description: >
+      Henry Hub spot price for natural gas. High prices increase input costs
+      across manufacturing and transportation sectors.
+
+  - id: energy_cpi
+    name: "Energy CPI Component"
+    category: energy
+    timing: lagging
+    source: fred
+    series_id: CPIENGSL
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: 10.0
+    danger_threshold: 20.0
+    invert: false
+    description: >
+      Year-over-year % change in the energy sub-index of the Consumer Price Index
+      (FRED: CPIENGSL). Energy price spikes are a direct input cost shock across
+      manufacturing, transportation, and household spending. WARNING at +10% YoY
+      (notable energy inflation, above normal volatility range); DANGER at +20%
+      YoY (severe supply shock comparable to 2005, 2011, and 2021–2022 energy
+      crises). Rapid energy price spikes have historically preceded recessions.
+
+  # ── AUTOMOTIVE MARKET ─────────────────────────────────────────────────────
+  - id: total_vehicle_sales
+    name: "Total Vehicle Sales (SAAR)"
+    category: automotive
+    timing: coincident
+    source: fred
+    series_id: TOTALSA
+    frequency: monthly
+    unit: "millions (SAAR)"
+    warning_threshold: 14.0
+    danger_threshold: 12.0
+    invert: true
+    description: >
+      Total annualized vehicle sales. Sales below 13M SAAR historically
+      correlate with recession conditions.
+
+  - id: new_vehicle_sales
+    name: "New Light Vehicle Sales"
+    category: automotive
+    timing: coincident
+    source: fred
+    series_id: LAUTONSA
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    warning_threshold: -5.0
+    danger_threshold: -15.0
+    invert: true
+    description: >
+      Year-over-year % change in new light vehicle unit sales (FRED: LAUTONSA,
+      monthly, not seasonally adjusted). Tracking the YoY trend captures total
+      demand momentum — a sustained drop in unit sales reflects consumer
+      retrenchment regardless of price level. WARNING at -5% YoY (early demand
+      pullback, more sensitive early warning signal); DANGER at -15% YoY (deep
+      contraction comparable to the 2009 financial crisis and early 2020 COVID
+      shutdowns). Note: the YoY comparison accounts for seasonal patterns in
+      vehicle buying.
+
+  - id: auto_delinquency
+    name: "Consumer Loan Delinquency Rate"
+    category: consumer_health
+    timing: lagging
+    source: fred
+    series_id: DRCLACBS
+    frequency: quarterly
+    unit: "%"
+    warning_threshold: 2.5
+    danger_threshold: 4.0
+    invert: false
+    description: >
+      Delinquency rate on consumer loans at commercial banks (%, FRED: DRCLACBS,
+      quarterly, 1987–present). Covers auto, personal loans, and related credit.
+      WARNING at 2.5%; DANGER at 4.0% (crisis level seen in 2009).
+
+  - id: auto_loan_rate
+    name: "Auto Loan Rate (60-Month New Car)"
+    category: automotive
+    timing: coincident
+    # Was manual_csv with 0 rows ever (Sep 2026 audit): the FRD's FRED id did
+    # not exist and the Settings page never listed this KPI for upload.
+    # Bankrate on FRED is weekly and current; the Fed G.19 equivalents
+    # (TERMCBAUTO48NS / RIFLPBCIANM60NM) only observe Feb/May/Aug/Nov.
+    source: fred
+    series_id: BRMALR0102
+    frequency: weekly
+    unit: "% APR"
+    # FRD said 8.0/10.0, but Bankrate has never reached 10 (max 9.81, Aug 2000)
+    # and its 5-year max is 7.94, so 8/10 would be dead weight. At 7.5/8.5,
+    # WARNING fires at cycle-peak affordability squeezes (1998-2008, 2023-25)
+    # and DANGER only at the 1998-2001 highs.
+    warning_threshold: 7.5
+    danger_threshold: 8.5
+    invert: false
+    description: >
+      Average rate on a 60-month new car loan (Bankrate Monitor via FRED:
+      BRMALR0102, weekly, 1998+). High auto loan rates squeeze vehicle
+      affordability and demand. WARNING at 7.5%, DANGER at 8.5%.
+
+  - id: used_vehicle_price
+    name: "Used Vehicle Price YoY Change (BLS CPI)"
+    category: automotive
+    timing: coincident
+    source: fred
+    series_id: CUSR0000SETA02
+    frequency: monthly
+    unit: "% YoY change"
+    compute_pct_change_periods: 12
+    warning_threshold: 10
+    danger_threshold: 20
+    invert: false
+    description: >
+      Year-over-year % change in BLS CPI for Used Cars and Trucks (FRED: CUSR0000SETA02,
+      monthly, 1967–present). Proxy for the Manheim Used Vehicle Value Index.
+      Rapid spikes signal supply chain disruption (2021: +45% YoY); sustained declines
+      signal weakening demand. WARNING at +10% YoY; DANGER at +20% YoY.
+
+  # Replaced `vehicle_repos` (FRED DROCLACBS) 2026-07. DROCLACBS covers
+  # bank-held "other consumer loans" — it is not auto-specific and, because it
+  # excludes captive finance arms (Ford Credit, GM Financial) and subprime
+  # finance companies where most repossessed loans actually sit, it never
+  # registered the 2024-26 auto credit deterioration. The NY Fed Consumer
+  # Credit Panel covers the full credit-bureau universe and does.
+  #
+  # Category is consumer_health, not automotive: this is a household balance
+  # sheet measure (it comes from the Household Debt and Credit report), it sits
+  # alongside `auto_delinquency` and `cc_delinquency` which are categorised the
+  # same way, and repossession stress is a consumer-solvency signal rather than
+  # an auto-industry demand signal.
+  - id: auto_90d_delinquency
+    name: "Auto Loans 90+ Days Delinquent (Repossession Pipeline)"
+    category: consumer_health
+    timing: lagging
+    source: scrape_nyfed_auto
+    series_id: null
+    frequency: quarterly
+    unit: "% of auto balance"
+    warning_threshold: 4.8
+    danger_threshold: 5.25
+    invert: false
+    # Rows are dated to the quarter START, and the report lands ~6 weeks after
+    # the quarter ENDS, so just before a release the newest row is ~225 days
+    # old. The 250d quarterly default leaves almost no margin; be explicit.
+    staleness_window_days: 260
+    description: >
+      Share of total US auto loan balances 90 or more days delinquent (New York
+      Fed Consumer Credit Panel / Equifax, quarterly, 2003Q1–present). Loans at
+      90+ days are the direct feedstock for repossession, so this is the closest
+      free, authoritative proxy for the repossession wave — Cox Automotive put
+      2024 repossessions at ~1.73M, the most since 2009, and this series is the
+      published measure that corroborates it. Unlike the bank-only FRED
+      delinquency series, the CCP covers captive finance arms and subprime
+      lenders, where repossession activity is concentrated.
+      2026Q1 reached 5.60%, an all-time high for the series, exceeding the
+      2010Q4 post-GFC peak of 5.27%. WARNING at 4.8% (the level that marked the
+      2009-11 delinquency wave and the 2019-20 build-up); DANGER at 5.25%
+      (above the Great Financial Crisis peak).
+      Note: released ~6 weeks after quarter end, so the latest reading lags by
+      one to two quarters. Tagged `lagging` because 90+ day delinquency is a
+      realised-loss measure — it confirms consumer distress rather than
+      predicting it.
+
+  - id: vehicle_days_supply
+    name: "Domestic Auto Inventories"
+    category: automotive
+    timing: coincident
+    source: fred
+    series_id: AUINSA
+    frequency: monthly
+    unit: "$ millions"
+    warning_threshold: 150
+    danger_threshold: 200
+    invert: false
+    description: >
+      Domestic auto and light truck inventories in $ millions (FRED: AUINSA, monthly,
+      Ward's Automotive/BEA). HIGH inventory signals demand weakness — dealers are
+      accumulating unsold vehicles, forcing production cuts and layoffs. WARNING above
+      $150M; DANGER above $200M (severe inventory buildup signaling overproduction
+      relative to demand). Note: the COVID chip shortage caused abnormally LOW
+      inventory ($100–300M) — that was a supply crisis, not a demand signal.
+      Post-COVID recovery range: $300–600M.
+
+  - id: auto_etf
+    name: "Auto Sector ETF YoY (Automotive Proxy)"
+    category: automotive
+    timing: coincident
+    source: yfinance
+    series_id: "CARZ"
+    frequency: daily
+    unit: "% YoY"
+    compute_pct_change_periods: 252
+    warning_threshold: -15
+    danger_threshold: -30
+    invert: true
+    description: >
+      First Trust S-Network Future Vehicles & Electric Cars ETF year-over-year
+      performance (Yahoo Finance: CARZ, daily). Daily forward-looking proxy for
+      monthly auto sales data. Stock market prices in automotive sector weakness
+      before monthly Census/BEA sales data confirms. WARNING at -15% YoY;
+      DANGER at -30% YoY. Uses 252 trading days for YoY comparison.
+
+  # ── TOURISM MARKET ────────────────────────────────────────────────────────
+  - id: tsa_throughput
+    name: "TSA Checkpoint Throughput"
+    category: consumer_health
+    timing: coincident
+    source: tsa
+    series_id: null
+    frequency: daily
+    unit: "passengers/day"
+    warning_threshold: 1800000
+    danger_threshold: 1200000
+    invert: true
+    description: >
+      Daily passengers screened at TSA checkpoints. Leading proxy for domestic
+      and international air travel demand. Pre-COVID baseline (2019): ~2.3–2.5M/day.
+      Post-COVID recovery (2022–2024): ~2.0–2.7M/day. WARNING below 1.8M/day
+      (significant travel demand weakness); DANGER below 1.2M/day (deep recession
+      territory). Note: TSA website typically provides only ~1 year of data history;
+      longer history is not available from this free source.
+
+  - id: umcsent
+    name: "U of Michigan Consumer Sentiment"
+    category: consumer_health
+    timing: leading
+    source: fred
+    series_id: UMCSENT
+    frequency: monthly
+    unit: "index"
+    warning_threshold: 60
+    danger_threshold: 50
+    invert: true
+    description: >
+      University of Michigan Consumer Sentiment Index (FRED: UMCSENT, monthly,
+      1952-present). Surveys 500 households on personal finances, business
+      conditions, and buying conditions. WARNING at 60 (pessimistic territory,
+      last seen in 2008 and 2022); DANGER at 50 (extreme pessimism, comparable
+      to the 2022 inflation shock trough of 50.0 and the 2008 GFC low of 55.3).
+      Complements the OECD Consumer Confidence Index with a more granular,
+      US-specific sentiment reading.
+
+  - id: hotel_occupancy
+    # Id kept for continuity (ism_services / housing_affordability precedent).
+    # STR hotel occupancy is proprietary, and this manual_csv KPI never
+    # received an upload (0 rows, Sep 2026 audit). Replaced with the closest
+    # free volume proxy: BLS accommodation employment. Hotels shed staff as
+    # room demand falls. Documented deviation from FRD Appendix C rule 4.
+    name: "Accommodation Employment YoY (Hotel Demand Proxy)"
+    category: consumer_health
+    timing: coincident
+    source: fred
+    series_id: CES7072100001
+    frequency: monthly
+    unit: "% YoY"
+    compute_pct_change_periods: 12
+    # Since 1990, every non-recession month at or below -1.5% is a recession
+    # aftermath (1991-92, 2001-04 incl. 9/11, 2009-10, 2020-21). No mid-expansion
+    # false alarms; the 2026 wobble (min -1.14%) stays OK. Recession troughs
+    # -6.2% (2001), -6.9% (2009), -48.9% (2020).
+    warning_threshold: -1.5
+    danger_threshold: -4.0
+    invert: true
+    description: >
+      Year-over-year % change in accommodation employment (BLS CES via FRED:
+      CES7072100001, monthly, 1972+). A free proxy for hotel occupancy, which is
+      proprietary (STR). Hotels cut staff as room demand falls, so this tracks
+      business and leisure travel. WARNING at -1.5% YoY, DANGER at -4% YoY.
+
