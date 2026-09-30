@@ -67,6 +67,7 @@ def endpoint_allowlist(config: dict, category_ids: list) -> list:
         "/score/drivers",
         "/leading",
         "/severity",
+        "/ai-bubble",
         "/benchmarks",
         "/ml/status",
         "/backtest",

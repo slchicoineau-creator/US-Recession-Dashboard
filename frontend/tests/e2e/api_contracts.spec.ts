@@ -49,11 +49,13 @@ test.describe('API contract tests (no browser)', () => {
     }
   });
 
-  test('GET /api/categories returns 8 categories with sparkline', async ({ request }) => {
+  test('GET /api/categories returns 8 scored categories + the AI bubble monitor', async ({ request }) => {
     const resp = await request.get('/api/categories');
     expect(resp.ok()).toBeTruthy();
     const body = await resp.json();
-    expect(body.length).toBe(8);
+    expect(body.filter((c: any) => c.in_composite === true).length).toBe(8);
+    const monitor = body.filter((c: any) => c.in_composite === false);
+    expect(monitor.map((c: any) => c.id)).toEqual(['ai_bubble']);
     for (const c of body) {
       expect(c).toHaveProperty('id');
       expect(c).toHaveProperty('label');

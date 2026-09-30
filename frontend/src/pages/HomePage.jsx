@@ -24,6 +24,7 @@ const BAND_COLOR = {
   business_activity: "#2980b9",
   energy:            "#d35400",
   automotive:        "#7f8c8d",
+  ai_bubble:         "#b83280",
 };
 
 const RISK_BAND_COLOR = {
@@ -97,6 +98,17 @@ const EXPLAIN = {
     "Calibration: Oct 2009 scored 65 (SEVERE), COVID 2020 only 31 (deep, but no credit collapse), " +
     "normal times 0. Sitting at zero is by design — it only wakes up when a downturn has " +
     "depression mechanics.",
+  aiBubble:
+    "Is the AI-led stock market a bubble, and is it breaking? NOT part of the Recession Risk " +
+    "Score — a separate market-risk view.\n\n" +
+    "**Exposure** (how big and stretched): tech capex as % of GDP, how few stocks carry the " +
+    "index (equal-weight vs S&P 500), the CAPE ratio and market cap / GDP. These are levels " +
+    "and can stay high for years.\n\n" +
+    "**Puncture** (is it deflating): semiconductors, the S&P 500 and private-credit lenders (BDCs) " +
+    "breaking below their 200-day averages, and junk-bond spreads widening.\n\n" +
+    "Calibration: Dec 2021 read exposure ~53 with puncture 0 (“inflated but intact”); " +
+    "by Jun 2022 puncture was ~82 (“bursting”). A high exposure reading says the fall " +
+    "would be large if it comes — it does not say when.",
   forecast:
     "Pure momentum. Fits a straight-line trend through each KPI's last 24 data " +
     "points, projects 3 months ahead, and re-scores the composite on those projected values.\n\n" +
@@ -305,6 +317,51 @@ function SeverityPanel({ severityData }) {
   );
 }
 
+const BUBBLE_COLOR = {
+  LOW: "#1a9850", MODERATE: "#856404", HIGH: "#d35400", EXTREME: "#842029",
+  INTACT: "#1a9850", CRACKING: "#856404", BREAKING: "#d35400", BURSTING: "#842029",
+};
+
+function AiBubblePanel({ bubbleData }) {
+  if (!bubbleData || bubbleData.exposure?.score == null) return null;
+  const { exposure, puncture, verdict } = bubbleData;
+  const hot = [...(exposure.components || []), ...(puncture?.components || [])]
+    .filter(c => (c.sub_score ?? 0) >= 0.5);
+  const gauge = (label, g) => (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+      <span style={{ fontSize: ".72rem", color: "#6c757d", width: 62 }}>{label}</span>
+      <span style={{ fontSize: "1.35rem", fontWeight: 700, color: BUBBLE_COLOR[g?.band] || "#495057" }}>
+        {g?.score != null ? g.score.toFixed(0) : "—"}
+      </span>
+      {g?.band && (
+        <span style={{
+          fontSize: ".68rem", fontWeight: 700, color: "#fff",
+          background: BUBBLE_COLOR[g.band] || "#495057", borderRadius: 4, padding: "1px 6px",
+        }}>{g.band}</span>
+      )}
+    </div>
+  );
+  return (
+    <StatTile title="AI Bubble Monitor" info={EXPLAIN.aiBubble} tipAlign="right">
+      <div data-testid="ai-bubble-tile">
+        {gauge("Exposure", exposure)}
+        {gauge("Puncture", puncture)}
+      </div>
+      {verdict && (
+        <div style={{ fontSize: ".75rem", fontWeight: 600, marginTop: 4 }}>{verdict}</div>
+      )}
+      {hot.length > 0 && (
+        <div style={{ fontSize: ".72rem", color: "#c0392b", marginTop: 2 }}>
+          High: {hot.map(c => c.label).join(", ")}
+        </div>
+      )}
+      <div style={{ fontSize: ".68rem", color: "#adb5bd", marginTop: "auto", paddingTop: 6 }}>
+        Market-bubble view — not part of the Recession Risk Score.
+      </div>
+    </StatTile>
+  );
+}
+
 function ForecastScorePanel({ forecastData, simDate }) {
   if (!forecastData) return null;
 
@@ -378,6 +435,7 @@ export default function HomePage() {
   const [forecastData, setForecastData] = useState(null);
   const [leadingData, setLeadingData] = useState(null);
   const [severityData, setSeverityData] = useState(null);
+  const [bubbleData, setBubbleData] = useState(null);
   const [driversData, setDriversData] = useState(null);
   const [benchmarks, setBenchmarks] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -401,6 +459,7 @@ export default function HomePage() {
     setForecastData(null);
     setLeadingData(null);
     setSeverityData(null);
+    setBubbleData(null);
     setDriversData(null);
     setBenchmarks(null);
     setError(null);
@@ -414,12 +473,13 @@ export default function HomePage() {
         api.nberShading(),
       ]);
       // Forecast + leading + severity + drivers are optional — silently degrade on failure
-      const [forecast, leading, severity, drivers, bench] = await Promise.all([
+      const [forecast, leading, severity, drivers, bench, bubble] = await Promise.all([
         api.scoreForecast(simDate).catch(() => null),
         api.leading(simDate).catch(() => null),
         api.severity(simDate).catch(() => null),
         api.scoreDrivers(simDate).catch(() => null),
         api.benchmarks(simDate).catch(() => null),
+        api.aiBubble(simDate).catch(() => null),
       ]);
       if (token !== loadSeqRef.current) return;
       setScoreData(score);
@@ -429,10 +489,13 @@ export default function HomePage() {
       setForecastData(forecast);
       setLeadingData(leading);
       setSeverityData(severity);
+      setBubbleData(bubble);
       setDriversData(drivers);
       setBenchmarks(bench);
       const sorted = [...kpis]
-        .filter(k => k.sub_score != null)
+        // Monitor-only KPIs (ai_bubble) are not score drivers — keep them out
+        // of the alert banner's "top contributors".
+        .filter(k => k.sub_score != null && k.in_composite !== false)
         .sort((a, b) => b.sub_score - a.sub_score);
       setTopKpis(sorted.slice(0, 3));
     } catch (err) {
@@ -556,6 +619,7 @@ export default function HomePage() {
           <ProbabilityPanel scoreData={scoreData} benchmarks={benchmarks} />
           <LeadingPanel leadingData={leadingData} simDate={simDate} />
           <SeverityPanel severityData={severityData} />
+          <AiBubblePanel bubbleData={bubbleData} />
           <ForecastScorePanel forecastData={forecastData} simDate={simDate} />
         </div>
       </div>
@@ -599,6 +663,7 @@ export default function HomePage() {
             </div>
             <div style={{ fontSize: ".75rem", color: "#6c757d", marginTop: 6 }}>
               {cat.kpi_count} indicators
+              {cat.in_composite === false && " · monitor only, not in score"}
             </div>
           </div>
         ))}

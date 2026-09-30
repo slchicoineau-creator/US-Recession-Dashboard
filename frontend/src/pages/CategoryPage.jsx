@@ -17,6 +17,7 @@ const CATEGORY_LABELS = {
   business_activity: "Business Activity",
   energy:            "Energy Market",
   automotive:        "Automotive Market",
+  ai_bubble:         "AI Bubble Monitor",
 };
 
 const STATUS_COLOR = {
@@ -124,6 +125,12 @@ export default function CategoryPage() {
       <div className="page-header">
         <h1>{label}</h1>
         <p>{kpis.length} indicators in this category</p>
+        {kpis.length > 0 && kpis.every(k => k.in_composite === false) && (
+          <p data-testid="monitor-only-note" style={{ color: "#856404", fontSize: ".85rem" }}>
+            Monitor only — these indicators are shown for context and are not part of the
+            Recession Risk Score. They feed the AI Bubble tile on the Overview page.
+          </p>
+        )}
       </div>
 
       <div className="card" style={{ padding: 0, overflow: "auto" }}>

@@ -416,6 +416,32 @@ def api_severity():
     return jsonify(compute_severity(as_of=min(as_of, date.today()) if as_of else None))
 
 
+# ---------------------------------------------------------------------------
+# API: AI bubble monitor (NOT part of the composite score)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ai-bubble")
+def api_ai_bubble():
+    """AI-bubble exposure + puncture readings (kpi_config `ai_bubble:`)."""
+    from backend.ai_bubble import compute_ai_bubble
+    as_of = _parse_as_of()
+    return jsonify(compute_ai_bubble(as_of=min(as_of, date.today()) if as_of else None))
+
+
+@app.route("/api/ai-bubble/history")
+def api_ai_bubble_history():
+    """Monthly exposure/puncture history; no DB caching (loads each series once)."""
+    from backend.ai_bubble import compute_ai_bubble_history
+    as_of = _parse_as_of()
+    raw_from = request.args.get("from_date", "2007-01-01")
+    try:
+        from_date = date.fromisoformat(raw_from)
+    except (ValueError, TypeError):
+        from_date = date(2007, 1, 1)
+    end_date = min(as_of, date.today()) if as_of is not None else date.today()
+    return jsonify(compute_ai_bubble_history(from_date, end_date))
+
+
 @app.route("/api/benchmarks")
 def api_benchmarks():
     """Independent benchmark probabilities: yield-curve probit (NY Fed method)
@@ -709,6 +735,9 @@ def api_kpis():
                 "sub_score": round(sub_score, 3) if sub_score is not None else None,
                 "status": status,
                 "stale": stale,
+                # False for monitor-only categories (e.g. ai_bubble) — shown on
+                # the dashboard but not part of the Recession Risk Score.
+                "in_composite": kpi["category"] in config["category_weights"],
                 "chart_y_min": kpi.get("chart_y_min"),
                 "chart_y_max": kpi.get("chart_y_max"),
                 # 3-month forecast fields
@@ -805,6 +834,9 @@ _CATEGORY_INFO = {
     "business_activity": {"label": "Business Activity",       "icon": "🏭"},
     "energy":            {"label": "Energy Market",           "icon": "⛽"},
     "automotive":        {"label": "Automotive Market",       "icon": "🚗"},
+    # Monitor-only categories (kpi_config `monitor_categories:`) — not scored.
+    **{cid: {"label": meta["label"], "icon": meta["icon"]}
+       for cid, meta in (_load_config().get("monitor_categories") or {}).items()},
 }
 
 
@@ -837,6 +869,10 @@ def api_categories():
                 if row and (rep_latest_date is None or row[0] > rep_latest_date):
                     rep_latest_date = row[0]
                     rep_kpi = k
+            if rep_kpi is None and cat_kpis:
+                # Categories built only from derived sources (ai_bubble) still
+                # get a sparkline: fall back to their first KPI in config order.
+                rep_kpi = cat_kpis[0]
 
             sparkline = []
             if rep_kpi:
@@ -865,6 +901,7 @@ def api_categories():
             categories.append({
                 "id": cat_id,
                 "label": cat_meta["label"],
+                "in_composite": cat_id in config["category_weights"],
                 "icon": cat_meta["icon"],
                 "kpi_count": len(cat_kpis),
                 "warning_count": warning_count,
@@ -1142,6 +1179,9 @@ def generate_category_commentary(category_id: str):
             for cat, s in score_result.get("category_scores", {}).items()
         }
         cat_score = category_scores.get(category_id, 0.0)
+        # Monitor-only categories (ai_bubble) have no category score; the prompt
+        # must not present them as "0/100 LOW" or as score drivers.
+        monitor_only = category_id not in _load_config()["category_weights"]
 
         prompt = commentator.build_category_prompt(
             category_id=category_id,
@@ -1149,6 +1189,8 @@ def generate_category_commentary(category_id: str):
             category_score=cat_score,
             all_category_scores=category_scores,
             as_of_date=as_of,
+            monitor_only=monitor_only,
+            label=_CATEGORY_INFO[category_id]["label"],
         )
         text = commentator.call_claude(prompt)
         model = commentator._get_model()
@@ -1266,6 +1308,7 @@ def _build_kpi_list(as_of: date) -> list:
                 "id": kpi_id,
                 "name": kpi["name"],
                 "category": kpi["category"],
+                "in_composite": kpi["category"] in config["category_weights"],
                 "unit": kpi.get("unit", ""),
                 "latest_value": latest_val,
                 "status": status,

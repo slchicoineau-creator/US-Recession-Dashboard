@@ -85,10 +85,24 @@ def build_category_prompt(
     category_score: float,
     all_category_scores: dict,
     as_of_date: date_type,
+    monitor_only: bool = False,
+    label: Optional[str] = None,
 ) -> str:
-    """Build the prompt for a single-category AI commentary."""
-    label = _CATEGORY_LABELS.get(category_id, category_id)
+    """Build the prompt for a single-category AI commentary.
+
+    monitor_only: the category is shown on the dashboard but is NOT part of the
+    Recession Risk Score (kpi_config `monitor_categories:`), so it has no
+    category score and the prompt must not present one.
+    """
+    label = label or _CATEGORY_LABELS.get(category_id, category_id)
     band = _band(category_score)
+    score_line = (
+        "Category Risk Score: none. This is a monitor-only category and is NOT part of the "
+        "Recession Risk Score; it tracks AI-bubble exposure and whether that bubble is breaking. "
+        "Do not describe these indicators as driving the recession score."
+        if monitor_only else
+        f"Category Risk Score: {category_score:.0f}/100 ({band})"
+    )
 
     # KPI rows for this category
     cat_kpis = [k for k in kpis if k.get("category") == category_id]
@@ -132,7 +146,7 @@ def build_category_prompt(
 
 Date: {as_of_date.strftime('%B %d, %Y')}
 Category: {label}
-Category Risk Score: {category_score:.0f}/100 ({band})
+{score_line}
 
 Current indicator readings:
 {kpi_section}
@@ -168,7 +182,9 @@ def build_global_prompt(
     cat_section = "\n".join(cat_rows)
 
     # Top 6 highest-risk KPIs
-    flagged = [k for k in all_kpis if k.get("sub_score") is not None and k.get("status") != "NO_DATA"]
+    # Monitor-only KPIs (ai_bubble) are not recession-score drivers — keep them out.
+    flagged = [k for k in all_kpis if k.get("sub_score") is not None and k.get("status") != "NO_DATA"
+               and k.get("in_composite", True)]
     flagged.sort(key=lambda k: k.get("sub_score") or 0, reverse=True)
     top_kpis = flagged[:6]
     kpi_rows = []

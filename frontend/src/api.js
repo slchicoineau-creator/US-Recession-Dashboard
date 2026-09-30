@@ -68,6 +68,8 @@ export const api = {
 
   severity: (asOf) => _get(`/severity${asOf ? `?as_of=${asOf}` : ""}`),
 
+  aiBubble: (asOf) => _get(`/ai-bubble${asOf ? `?as_of=${asOf}` : ""}`),
+
   benchmarks: (asOf) => _get(`/benchmarks${asOf ? `?as_of=${asOf}` : ""}`),
 
   uploadCsv: async (kpiId, file) => {

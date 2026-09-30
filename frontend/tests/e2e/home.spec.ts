@@ -42,11 +42,22 @@ test.describe('HomePage — gauge, score, banners', () => {
     expect(new Date(maxAttr!).getTime()).toBeLessThanOrEqual(Date.now() + 24 * 3600 * 1000);
   });
 
-  test('all 8 categories rendered as clickable cards', async ({ page }) => {
+  test('all 8 scored categories + AI bubble monitor rendered as clickable cards', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByText('KPI Categories')).toBeVisible({ timeout: 30_000 });
     const cards = page.locator('.category-card');
-    await expect(cards).toHaveCount(8);
+    await expect(cards).toHaveCount(9);
+    await expect(cards.filter({ hasText: 'monitor only, not in score' })).toHaveCount(1);
+  });
+
+  test('AI bubble tile shows both readings; category page flags monitor-only', async ({ page }) => {
+    await page.goto('/');
+    const tile = page.getByTestId('ai-bubble-tile');
+    await expect(tile).toBeVisible({ timeout: 30_000 });
+    await expect(tile).toContainText('Exposure');
+    await expect(tile).toContainText('Puncture');
+    await page.goto('/category/ai_bubble');
+    await expect(page.getByTestId('monitor-only-note')).toBeVisible({ timeout: 30_000 });
   });
 
   test('refresh button present in live mode', async ({ page }) => {

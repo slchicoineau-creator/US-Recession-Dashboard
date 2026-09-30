@@ -11,7 +11,8 @@ from backend.leading import (
 )
 
 
-VALID_TIMINGS = {"leading", "coincident", "lagging"}
+# `monitor` = shown on the dashboard but excluded from every index (ai_bubble)
+VALID_TIMINGS = {"leading", "coincident", "lagging", "monitor"}
 
 
 # ---------------------------------------------------------------------------

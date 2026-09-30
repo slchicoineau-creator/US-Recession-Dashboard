@@ -641,6 +641,30 @@ def fetch_derived_ma(ticker: str, start: date, end: date, ma_window: int = 200) 
 
 
 # ---------------------------------------------------------------------------
+# Relative performance of two tickers (derived price ratio)
+# ---------------------------------------------------------------------------
+
+def fetch_derived_relative(kpi: dict, start: date, end: date) -> pd.Series:
+    """Daily price ratio series_id / benchmark_ticker (e.g. RSP / SPY).
+
+    Returns the raw ratio; the KPI's `compute_pct_change_periods` (applied in
+    fetch_kpi) turns it into relative performance over N trading days. Dates
+    where either ticker has no close are dropped rather than forward-filled,
+    so a holiday mismatch can't fabricate a ratio.
+    """
+    ticker = kpi["series_id"]
+    benchmark = kpi.get("benchmark_ticker")
+    if not benchmark:
+        raise RuntimeError(f"derived_relative KPI {kpi['id']} has no benchmark_ticker")
+    num = fetch_yfinance(ticker, start, end, frequency="daily")
+    den = fetch_yfinance(benchmark, start, end, frequency="daily")
+    ratio = (num / den).dropna()
+    if ratio.empty:
+        raise RuntimeError(f"No overlapping data for {ticker}/{benchmark}")
+    return ratio
+
+
+# ---------------------------------------------------------------------------
 # Buffett Indicator — derived ratio (Market Cap / GDP)
 # ---------------------------------------------------------------------------
 
@@ -893,6 +917,11 @@ _PLAUSIBLE_RANGES = {
     "shiller_cape":         (5, 60),       # CAPE ratio; historical range ~5 (1920s) to ~45 (2021)
     "sp500_ma200":          (-50, 50),     # % distance from 200-day MA; extreme = COVID -30%
     "buffett_indicator":    (30, 250),     # % of GDP; historical range ~40% (1982) to ~200% (2021)
+    # --- AI Bubble Monitor KPIs (monitor-only, not scored) ---
+    "tech_capex_gdp":       (2.0, 8.0),    # % of GDP; 1995-2026 range 3.4-5.05
+    "market_breadth_gap":   (-40, 40),     # pp, 12M RSP/SPY; 2004-2026 range ~-12 to +16
+    "semis_ma200":          (-80, 150),    # % from 200d MA; 2002 trough ~-53, Jun 2026 peak ~+76
+    "private_credit_ma200": (-70, 50),     # % from 200d MA; COVID trough ~-52
 }
 
 def _is_plausible(kpi_id: str, value: float) -> bool:
@@ -1047,6 +1076,8 @@ def fetch_kpi(kpi: dict, incremental: bool = True) -> None:
             series = fetch_derived_ma(kpi["series_id"], start_date, end_date, ma_window)
         elif source == "derived_ratio":
             series = fetch_derived_ratio(kpi, start_date, end_date)
+        elif source == "derived_relative":
+            series = fetch_derived_relative(kpi, start_date, end_date)
         else:
             logger.warning("Unknown source '%s' for KPI %s", source, kpi_id)
             return
@@ -1095,6 +1126,8 @@ def clear_and_refetch_changed_series() -> None:
                 num_id = kpi.get("ratio_numerator", {}).get("series_id", "")
                 den_id = kpi.get("ratio_denominator", {}).get("series_id", "")
                 series_id = f"{num_id}/{den_id}"
+            elif source == "derived_relative":
+                series_id = f"{kpi.get('series_id', '')}/{kpi.get('benchmark_ticker', '')}"
             else:
                 series_id = kpi.get("series_id") or ""
 

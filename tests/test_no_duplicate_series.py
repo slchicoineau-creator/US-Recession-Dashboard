@@ -53,7 +53,10 @@ def test_every_kpi_has_required_fields(kpi_config):
 
 
 def test_category_in_known_set(kpi_config):
-    valid_cats = set(kpi_config["category_weights"].keys())
+    # Scored categories plus the explicitly declared monitor-only ones (never
+    # "any category", so a mistyped category still fails here).
+    valid_cats = (set(kpi_config["category_weights"].keys())
+                  | set((kpi_config.get("monitor_categories") or {}).keys()))
     bad = []
     for kpi in kpi_config["kpis"]:
         if kpi["category"] not in valid_cats:

@@ -24,6 +24,21 @@ category_weights:
   automotive:       0.04
 
 # ---------------------------------------------------------------------------
+# Monitor-only categories (NOT scored)
+# KPIs in these categories are fetched, charted, badged and staleness-checked
+# like any other KPI, but they are deliberately NOT in `category_weights`, so
+# the composite score, the ML feature matrix and the score drivers never see
+# them (scorer.score_from_values skips categories without a weight). Their KPIs
+# carry `timing: monitor` so the leading index, diffusion breadth and the
+# backtester skip them too. Added Sep 2026 for the AI-bubble monitor; see the
+# `ai_bubble:` section below for why these are kept out of the composite.
+# ---------------------------------------------------------------------------
+monitor_categories:
+  ai_bubble:
+    label: "AI Bubble Monitor"
+    icon: "🫧"
+
+# ---------------------------------------------------------------------------
 # Depression Severity components
 # Answers "how severe is the downturn regime?" — orthogonal to the composite
 # score, which measures how LIKELY a recession is. Each component maps one
@@ -57,6 +72,67 @@ severity:
       healthy: 6.0       # bad recession but recoverable
       extreme: 15.0      # depression-scale unemployment
       weight: 0.20
+
+# ---------------------------------------------------------------------------
+# AI Bubble Monitor (backend/ai_bubble.py, GET /api/ai-bubble)
+# Answers "how big is the AI-led market bubble, and is it breaking?" — a
+# different question from the composite (how LIKELY is a recession), so it is
+# kept out of it, like `severity:`. Reasons it is NOT in the composite:
+#   * Exposure measures are LEVELS (tech capex/GDP is at a record now); inside a
+#     scored category they would pin it at DANGER without being a timing signal.
+#   * None of them has a recession-lead track record on this app's 2006+ data.
+#   * Adding KPIs to scored categories forces a cache wipe + ML retrain.
+# Two separate 0-100 readings, same interpolation as `severity:` (healthy -> 0,
+# extreme -> 1, direction inferred; weights within each gauge sum to 1.0;
+# missing components are renormalised away):
+#   exposure - how large and stretched the bubble is (can stay high for years)
+#   puncture - whether it is actually deflating (AI-complex and credit breaks)
+# Reading them together: high exposure + low puncture = inflated but intact
+# (1999, 2021, today); high exposure + rising puncture = bursting (2000, 2022).
+# ---------------------------------------------------------------------------
+ai_bubble:
+  exposure:
+    - kpi_id: tech_capex_gdp
+      label: "Tech capex / GDP"
+      healthy: 3.8       # 2010s norm ~3.5-3.9%
+      extreme: 4.8       # above the 2000 dot-com peak (4.46%); Q2 2026 = 5.05%
+      weight: 0.30
+    - kpi_id: market_breadth_gap
+      label: "Market concentration"
+      healthy: 0.0       # equal-weight keeping pace with cap-weight
+      extreme: -10.0     # 2020 and 2023-24 extremes (~-10 to -12 pp)
+      weight: 0.20
+    - kpi_id: shiller_cape
+      label: "CAPE valuation"
+      healthy: 20.0
+      extreme: 44.0      # Dec 1999 dot-com peak (44.2)
+      weight: 0.25
+    - kpi_id: buffett_indicator
+      label: "Market cap / GDP"
+      healthy: 100.0
+      extreme: 220.0     # Dec 2021 peak ~219% on this series
+      weight: 0.25
+  puncture:
+    - kpi_id: semis_ma200
+      label: "Semiconductors breaking down"
+      healthy: 0.0
+      extreme: -25.0     # 2000-02, 2008, 2022 troughs all below -25%
+      weight: 0.30
+    - kpi_id: sp500_ma200
+      label: "S&P 500 breaking down"
+      healthy: 0.0
+      extreme: -15.0
+      weight: 0.25
+    - kpi_id: private_credit_ma200
+      label: "Private credit (BDCs) breaking down"
+      healthy: 0.0
+      extreme: -15.0     # 2015-16, 2020, 2022 stress episodes
+      weight: 0.20
+    - kpi_id: hy_spread
+      label: "Junk-bond spreads widening"
+      healthy: 3.5
+      extreme: 7.0
+      weight: 0.25
 
 # ---------------------------------------------------------------------------
 # Benchmark reference series (NOT KPIs)
@@ -1710,3 +1786,108 @@ kpis:
       proprietary (STR). Hotels cut staff as room demand falls, so this tracks
       business and leisure travel. WARNING at -1.5% YoY, DANGER at -4% YoY.
 
+
+  # -------------------------------------------------------------------------
+  # AI Bubble Monitor KPIs (added Sep 2026) — category ai_bubble is a
+  # monitor-only category (see `monitor_categories:`), so these never enter the
+  # composite score, ML features or leading index. `timing: monitor` keeps them
+  # out of leading.py's diffusion index. Consumed by backend/ai_bubble.py.
+  # -------------------------------------------------------------------------
+  - id: tech_capex_gdp
+    name: "Tech Capex as % of GDP (AI Build-Out)"
+    category: ai_bubble
+    timing: monitor
+    source: derived_ratio
+    series_id: null
+    frequency: quarterly
+    unit: "% of GDP"
+    ratio_numerator:
+      source: fred
+      series_id: A679RC1Q027SBEA   # Private fixed investment: info-processing equipment + software, $B SAAR
+    ratio_denominator:
+      source: fred
+      series_id: GDP               # $B SAAR, same units — no unit_divisor needed
+    # Since 1995: 2000 dot-com peak 4.46% (Q4 2000); 2010s 3.4-4.0%; 2020-24
+    # ~4.0-4.15%; Q2 2025 onward >= 4.46% (new record, 5.05% in Q2 2026).
+    # Includes software, which has trended up for decades — equipment alone
+    # (Y034RC1Q027SBEA) is 2.57% vs a 2.91% 2000 peak, i.e. NOT a record.
+    warning_threshold: 4.3
+    danger_threshold: 4.6
+    invert: false
+    description: >
+      US private investment in information-processing equipment and software
+      (servers, chips, networking, software) as a percentage of nominal GDP —
+      the macro footprint of the AI build-out. FRED A679RC1Q027SBEA / GDP,
+      quarterly. The 2000 dot-com peak was 4.46%; the current reading is above
+      it. This is an EXPOSURE level, not a timing signal: it shows how much of
+      the economy depends on the capex cycle continuing, so a capex pullback
+      would hit GDP harder than in past cycles. Not included in the Recession
+      Risk Score. WARNING at 4.3%, DANGER at 4.6%.
+
+  - id: market_breadth_gap
+    name: "Market Breadth: Equal-Weight vs S&P 500 (12M)"
+    category: ai_bubble
+    timing: monitor
+    source: derived_relative
+    series_id: RSP                 # Invesco S&P 500 Equal Weight ETF
+    benchmark_ticker: SPY          # SPDR S&P 500 (cap-weighted)
+    frequency: daily
+    unit: "pp vs S&P 500"
+    compute_pct_change_periods: 252   # row-based: 252 trading days = 1 year
+    # 2004-2026 distribution of RSP/SPY 12M relative return: median -0.6,
+    # 25th pct -3.5, 10th pct -7.1, 5th pct -9.2. Extremes: 2020 (-11.6),
+    # 2023-24 (-10.3). Sep 2026: -4.0.
+    warning_threshold: -5
+    danger_threshold: -9
+    invert: true
+    description: >
+      Trailing 12-month return of the equal-weighted S&P 500 (RSP) minus the
+      cap-weighted S&P 500 (SPY), in percentage points (computed as the YoY
+      change in the RSP/SPY price ratio). Strongly negative values mean a few
+      mega-caps are carrying the index while the typical stock lags — the
+      concentration pattern behind "5 stocks = 93% of the gains". Not included
+      in the Recession Risk Score. WARNING below -5 pp, DANGER below -9 pp.
+
+  - id: semis_ma200
+    name: "Semiconductor Index vs 200-Day MA"
+    category: ai_bubble
+    timing: monitor
+    source: derived_ma
+    series_id: "^SOX"              # PHLX Semiconductor Index (NVDA, AVGO, AMD, MU, ...)
+    frequency: daily
+    unit: "% from MA"
+    ma_window: 200
+    # Below -10% in 2004, 2006, 2008, 2011, 2015, 2018, 2020, 2022, 2025;
+    # below -25% only in 2000-02, 2008, 2022 and Apr 2025.
+    warning_threshold: -10
+    danger_threshold: -20
+    invert: true
+    description: >
+      Percentage distance of the PHLX Semiconductor Index from its 200-day
+      moving average. Chip makers are the direct revenue beneficiaries of AI
+      capex, so a sustained break below the 200-day average is the earliest
+      market sign that the AI trade is unwinding. Noisy — semis correct often
+      without a recession. Not included in the Recession Risk Score. WARNING
+      below -10%, DANGER below -20%.
+
+  - id: private_credit_ma200
+    name: "Private Credit (BDC Index) vs 200-Day MA"
+    category: ai_bubble
+    timing: monitor
+    source: derived_ma
+    series_id: BIZD                # VanEck BDC Income ETF (publicly traded private-credit lenders)
+    frequency: daily
+    unit: "% from MA"
+    ma_window: 200
+    # History since 2013: -9 to -15% in 2015-16, 2018, 2022; -52% in 2020.
+    warning_threshold: -5
+    danger_threshold: -10
+    invert: true
+    description: >
+      Percentage distance of the BDC (business development company) index ETF
+      from its 200-day moving average. BDCs are the listed part of private
+      credit — the lenders financing much of the AI data-center build-out, and
+      a channel through which bank loans to non-bank lenders reach AI. Falling
+      BDC prices are the market pricing in credit losses before they show up
+      in reported defaults. Not included in the Recession Risk Score. WARNING
+      below -5%, DANGER below -10%.
